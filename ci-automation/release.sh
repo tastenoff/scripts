@@ -151,7 +151,29 @@ function _release_build_impl() {
       sign_artifacts "${SIGNER}" "aws-${arch}/flatcar_production_ami_"*txt "aws-${arch}/flatcar_production_ami_"*json
       copy_to_buildcache "images/${arch}/${vernum}/" "aws-${arch}/flatcar_production_ami_"*txt* "aws-${arch}/flatcar_production_ami_"*json*
     done
-    # TODO: publish SDK container image if SDK version is the same as the image version (e.g., on new major versions)
+
+    # Release the SDK if SDK version is the same as the image version (e.g., on new major versions).
+    if [[ "${vernum}" != "${sdk_version}" ]]; then
+        # Import the SDK Docker image from the buildcache.
+	docker_image_from_buildcache flatcar-sdk-all "${vernum}"
+	docker_image_from_buildcache flatcar-sdk-amd64 "${vernum}"
+	docker_image_from_buildcache flatcar-sdk-arm64 "${vernum}"
+
+	# Fetch the registry credentials.
+        registry_password=$(echo "${REGISTRY_PASSWORD}" | base64 --decode)
+        registry_username=$(echo "${REGISTRY_USERNAME}" | base64 --decode)
+        container_registry=$(echo "${CONTAINER_REGISTRY}" | base64 --decode)
+
+	# Log into the Docker registry.
+        echo "${registry_password}" | docker login "${container_registry}" -u "${registry_username}" --password-stdin
+
+	# Push the SDK on the Container Registry.
+        for a in all amd64 arm64; do
+	    docker push "${container_registry}/flatcar-sdk-${a}":"${docker_sdk_vernum}"
+	done
+    fi
+
+
     echo "===="
     echo "Done, now you can copy the images to Origin"
     echo "===="
