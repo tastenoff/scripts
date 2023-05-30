@@ -1,0 +1,239 @@
+From 83a25ccbb5cfecc822b390852299ac6c7db2f424 Mon Sep 17 00:00:00 2001
+From: Mathieu Tortuyaux <mtortuyaux@microsoft.com>
+Date: Tue, 30 May 2023 10:46:04 +0200
+Subject: [PATCH] openstack: Add attribute OPENSTACK_INSTANCE_UUID
+
+In the OpenStack attributes, the field `OPENSTACK_INSTANCE_ID` reports
+the instance ID fetched from the EC2-compatibility-layer metadata.
+However, that identifier (in the format `i-something`) does not match
+the one used to refer to machines in the OpenStack API.
+
+With this patch, I propose to add a new OpenStack attribute
+`OPENSTACK_INSTANCE_UUID` that reports the actual identifier for
+OpenStack instances in the context of the OpenStack API.
+
+Implementation-wise, this patch adds enables fetching the UUID from both
+the config-drive and from the Nova metadata service endpoint. In order
+to retain compatibility with old versions of the metadata service, this
+patch uses the old endpoint `2012-08-10`.
+
+Fixes #930
+
+Signed-off-by: Mathieu Tortuyaux <mtortuyaux@microsoft.com>
+---
+ docs/usage/attributes.md               |  6 ++-
+ src/providers/openstack/configdrive.rs | 11 +++++-
+ src/providers/openstack/mock_tests.rs  | 55 ++++++++++++++++++++++++++
+ src/providers/openstack/network.rs     | 39 +++++++++++++-----
+ 4 files changed, 99 insertions(+), 12 deletions(-)
+
+diff --git a/docs/usage/attributes.md b/docs/usage/attributes.md
+index 0170432..44e3090 100644
+--- a/docs/usage/attributes.md
++++ b/docs/usage/attributes.md
+@@ -88,13 +88,15 @@ Cloud providers with supported metadata endpoints and their respective attribute
+   - AFTERBURN_OPENSTACK_HOSTNAME
+   - AFTERBURN_OPENSTACK_IPV4_LOCAL
+   - AFTERBURN_OPENSTACK_IPV4_PUBLIC
+-  - AFTERBURN_OPENSTACK_INSTANCE_ID
++  - AFTERBURN_OPENSTACK_INSTANCE_ID (from the legacy EC2 metadata)
++  - AFTERBURN_OPENSTACK_INSTANCE_UUID
+   - AFTERBURN_OPENSTACK_INSTANCE_TYPE
+ * openstack-metadata
+   - AFTERBURN_OPENSTACK_HOSTNAME
+   - AFTERBURN_OPENSTACK_IPV4_LOCAL
+   - AFTERBURN_OPENSTACK_IPV4_PUBLIC
+-  - AFTERBURN_OPENSTACK_INSTANCE_ID
++  - AFTERBURN_OPENSTACK_INSTANCE_ID (from the legacy EC2 metadata)
++  - AFTERBURN_OPENSTACK_INSTANCE_UUID
+   - AFTERBURN_OPENSTACK_INSTANCE_TYPE
+ * packet
+   - AFTERBURN_PACKET_HOSTNAME
+diff --git a/src/providers/openstack/configdrive.rs b/src/providers/openstack/configdrive.rs
+index 0d76c10..942ec71 100644
+--- a/src/providers/openstack/configdrive.rs
++++ b/src/providers/openstack/configdrive.rs
+@@ -37,6 +37,8 @@ pub struct MetadataEc2JSON {
+ /// Partial object for openstack `meta_data.json`
+ #[derive(Debug, Deserialize)]
+ pub struct MetadataOpenstackJSON {
++    // Instance ID
++    pub uuid: Option<String>,
+     /// Availability zone.
+     pub availability_zone: Option<String>,
+     /// Local hostname.
+@@ -140,7 +142,7 @@ impl OpenstackConfigDrive {
+ 
+ impl MetadataProvider for OpenstackConfigDrive {
+     fn attributes(&self) -> Result<HashMap<String, String>> {
+-        let mut out = HashMap::with_capacity(5);
++        let mut out = HashMap::with_capacity(6);
+         let metadata_ec2: MetadataEc2JSON = self.read_metadata_ec2()?;
+         let metadata_openstack: MetadataOpenstackJSON = self.read_metadata_openstack()?;
+         if let Some(hostname) = metadata_openstack.hostname {
+@@ -149,6 +151,9 @@ impl MetadataProvider for OpenstackConfigDrive {
+         if let Some(instance_id) = metadata_ec2.instance_id {
+             out.insert("OPENSTACK_INSTANCE_ID".to_string(), instance_id);
+         }
++        if let Some(uuid) = metadata_openstack.uuid {
++            out.insert("OPENSTACK_INSTANCE_UUID".to_string(), uuid);
++        }
+         if let Some(instance_type) = metadata_ec2.instance_type {
+             out.insert("OPENSTACK_INSTANCE_TYPE".to_string(), instance_type);
+         }
+@@ -228,6 +233,10 @@ mod tests {
+             "abai-fcos-afterburn-test"
+         );
+         assert_eq!(parsed.availability_zone.unwrap_or_default(), "nova");
++        assert_eq!(
++            parsed.uuid.unwrap_or_default(),
++            "b3c7f4de-da0b-44ae-a42c-fa3806b61d7f"
++        );
+         assert_eq!(parsed.public_keys.unwrap_or_default(), expect);
+     }
+ 
+diff --git a/src/providers/openstack/mock_tests.rs b/src/providers/openstack/mock_tests.rs
+index 334abc7..d7ab3f8 100644
+--- a/src/providers/openstack/mock_tests.rs
++++ b/src/providers/openstack/mock_tests.rs
+@@ -49,3 +49,58 @@ fn test_ssh_keys_404_ok() {
+     mockito::reset();
+     provider.ssh_keys().unwrap_err();
+ }
++
++#[test]
++fn test_instance_uuid() {
++    let mut server = mockito::Server::new();
++    let mut provider = OpenstackProviderNetwork::try_new().unwrap();
++    provider.client = provider.client.max_retries(0).mock_base_url(server.url());
++
++    server
++        .mock("GET", "/openstack/2012-08-10/meta_data.json")
++        .with_status(200)
++        .with_header("content-type", "application/json")
++        .with_body(r#"{"uuid": "99dcf33b-6eb5-4acf-9abb-d81723e0c949", "public_keys": {"pprinett": "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQC/Zc+pyRoKWVS1CVx2soRe7Ia7RGkASpXZE495H2XuS3gF4Vb9JdATkJ4NURmAQhUN8TYCbfqTcf2Fpm/5mtG6Dn8Avua1mXgNRvrufVYBvWkOn9qPEYkwELSG0WcqjpISwsKRAU0d7Mcqo0aDmp/wpgbXHCBG03Q8w0uhRTdI7jEj/EzatbtkgUJnE79OHUImxdG+11oKH0Ul2lQlSo+pMa0fwS3GrHKIxxZmMckSpT+gua0AttuGpr+JYIZKNkoWn7bMqpYpJAlKxjzaB6ympaIAOgd/CxXnXPzc8ntIm/MubDUbGzo7dpq39MmxtWb1bahS/zeyFq0ZR43FbHexZyj21PiurtFOXl93r+wgBLBcVjBogi23p8i+SrjOVb+nJJ5XEUaLDYYE7T4xnrmT/T0ODQQbh6W+F+/mCSwOpRsZV0+FYcWg34InQM177eBweAv5Lwtct6B0xzCCXYpNTjWpBUe46dP7FO0ltzD57CGglRyx7whff96Og7Zx61/YfR/zrfI4NYiP+4EbiN24NuTn0DvND/anCpvA1Zpsd7bNMvL9YrlCRD2lfcQl3p6Kqi48jLNpqjEMYEmgYzzGjE1hFuVqdjY63bAmD3+NPlfARsgbMiPpLAmb3nE5FTCWktUTE8fnoWIojUYm7/4HoVQlwWxRhLKji5NiJGMgYw== cardno:9_040_793\n"}, "keys": [{"name": "pprinett", "type": "ssh", "data": "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQC/Zc+pyRoKWVS1CVx2soRe7Ia7RGkASpXZE495H2XuS3gF4Vb9JdATkJ4NURmAQhUN8TYCbfqTcf2Fpm/5mtG6Dn8Avua1mXgNRvrufVYBvWkOn9qPEYkwELSG0WcqjpISwsKRAU0d7Mcqo0aDmp/wpgbXHCBG03Q8w0uhRTdI7jEj/EzatbtkgUJnE79OHUImxdG+11oKH0Ul2lQlSo+pMa0fwS3GrHKIxxZmMckSpT+gua0AttuGpr+JYIZKNkoWn7bMqpYpJAlKxjzaB6ympaIAOgd/CxXnXPzc8ntIm/MubDUbGzo7dpq39MmxtWb1bahS/zeyFq0ZR43FbHexZyj21PiurtFOXl93r+wgBLBcVjBogi23p8i+SrjOVb+nJJ5XEUaLDYYE7T4xnrmT/T0ODQQbh6W+F+/mCSwOpRsZV0+FYcWg34InQM177eBweAv5Lwtct6B0xzCCXYpNTjWpBUe46dP7FO0ltzD57CGglRyx7whff96Og7Zx61/YfR/zrfI4NYiP+4EbiN24NuTn0DvND/anCpvA1Zpsd7bNMvL9YrlCRD2lfcQl3p6Kqi48jLNpqjEMYEmgYzzGjE1hFuVqdjY63bAmD3+NPlfARsgbMiPpLAmb3nE5FTCWktUTE8fnoWIojUYm7/4HoVQlwWxRhLKji5NiJGMgYw== cardno:9_040_793\n"}], "hostname": "mule", "name": "mule", "launch_index": 0, "availability_zone": "nova"}"#)
++        .create();
++
++    server
++        .mock(
++            "GET",
++            mockito::Matcher::Regex(r"^/latest/meta-data/.*$".to_string()),
++        )
++        .with_status(404)
++        .create();
++
++    let v = provider.attributes().unwrap();
++    assert_eq!(
++        v.get("OPENSTACK_INSTANCE_UUID"),
++        Some(&String::from("99dcf33b-6eb5-4acf-9abb-d81723e0c949"))
++    );
++    server.reset();
++    provider.attributes().unwrap_err();
++}
++
++#[test]
++fn test_instance_uuid_404_ok() {
++    let mut server = mockito::Server::new();
++    let mut provider = OpenstackProviderNetwork::try_new().unwrap();
++    provider.client = provider.client.max_retries(0).mock_base_url(server.url());
++
++    server
++        .mock("GET", "/openstack/2012-08-10/meta_data.json")
++        .with_status(404)
++        .create();
++
++    server
++        .mock(
++            "GET",
++            mockito::Matcher::Regex(r"^/latest/meta-data/.*$".to_string()),
++        )
++        .with_status(404)
++        .create();
++
++    let v = provider.attributes().unwrap();
++    assert_eq!(v.len(), 0);
++    server.reset();
++    provider.attributes().unwrap_err();
++}
+diff --git a/src/providers/openstack/network.rs b/src/providers/openstack/network.rs
+index 560271e..b46ebd5 100644
+--- a/src/providers/openstack/network.rs
++++ b/src/providers/openstack/network.rs
+@@ -2,14 +2,22 @@
+ 
+ use std::collections::HashMap;
+ 
+-use anyhow::{anyhow, bail, Result};
++use anyhow::{anyhow, bail, Context, Result};
+ use openssh_keys::PublicKey;
++use serde::Deserialize;
+ 
+ use crate::providers::MetadataProvider;
+ use crate::retry;
+ 
+-#[cfg(not(test))]
+-const URL: &str = "http://169.254.169.254/latest/meta-data";
++const EC2_URL: &str = "http://169.254.169.254/latest/meta-data";
++const NOVA_URL: &str = "http://169.254.169.254/openstack/2012-08-10/meta_data.json";
++
++/// Partial object for openstack `meta_data.json`
++#[derive(Debug, Deserialize, Default)]
++pub struct MetadataOpenstackJSON {
++    // Instance ID
++    pub uuid: Option<String>,
++}
+ 
+ #[derive(Clone, Debug)]
+ pub struct OpenstackProviderNetwork {
+@@ -22,14 +30,22 @@ impl OpenstackProviderNetwork {
+         Ok(OpenstackProviderNetwork { client })
+     }
+ 
+-    #[cfg(test)]
+     fn endpoint_for(key: &str) -> String {
+-        format!("{}/{}", &mockito::server_url(), key)
++        format!("{EC2_URL}/{key}")
+     }
+ 
+-    #[cfg(not(test))]
+-    fn endpoint_for(key: &str) -> String {
+-        format!("{}/{}", URL, key)
++    /// The metadata is stored as JSON in openstack/<version>/meta_data.json file
++    fn fetch_metadata_openstack(&self) -> Result<MetadataOpenstackJSON> {
++        let metadata: Option<String> =
++            self.client.get(retry::Raw, String::from(NOVA_URL)).send()?;
++
++        if let Some(metadata) = metadata {
++            let metadata: MetadataOpenstackJSON =
++                serde_json::from_str(&metadata).context("failed to parse JSON metadata")?;
++            Ok(metadata)
++        } else {
++            Ok(MetadataOpenstackJSON::default())
++        }
+     }
+ 
+     fn fetch_keys(&self) -> Result<Vec<String>> {
+@@ -67,7 +83,9 @@ impl OpenstackProviderNetwork {
+ 
+ impl MetadataProvider for OpenstackProviderNetwork {
+     fn attributes(&self) -> Result<HashMap<String, String>> {
+-        let mut out = HashMap::with_capacity(5);
++        let mut out = HashMap::with_capacity(6);
++
++        let openstack_metadata = self.fetch_metadata_openstack()?;
+ 
+         let add_value = |map: &mut HashMap<_, _>, key: &str, name| -> Result<()> {
+             let value = self
+@@ -82,6 +100,9 @@ impl MetadataProvider for OpenstackProviderNetwork {
+ 
+         add_value(&mut out, "OPENSTACK_HOSTNAME", "hostname")?;
+         add_value(&mut out, "OPENSTACK_INSTANCE_ID", "instance-id")?;
++        if let Some(instance_uuid) = openstack_metadata.uuid {
++            out.insert("OPENSTACK_INSTANCE_UUID".to_string(), instance_uuid);
++        };
+         add_value(&mut out, "OPENSTACK_INSTANCE_TYPE", "instance-type")?;
+         add_value(&mut out, "OPENSTACK_IPV4_LOCAL", "local-ipv4")?;
+         add_value(&mut out, "OPENSTACK_IPV4_PUBLIC", "public-ipv4")?;
+-- 
+2.39.2
+
