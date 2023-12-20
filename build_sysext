@@ -219,6 +219,7 @@ done
 
 # Unmount in order to get rid of the overlay
 umount "${BUILD_DIR}/install-root"
+sudo setfiles -Dv -r "${BUILD_DIR}/install-root" "${BUILD_DIR}/fs-root"/etc/selinux/mcs/contexts/files/file_contexts "${BUILD_DIR}/install-root"/usr
 umount "${BUILD_DIR}/fs-root"
 
 if [[ "$FLAGS_generate_pkginfo" = "${FLAGS_TRUE}" ]] ; then
